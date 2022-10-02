@@ -166,8 +166,8 @@ main (int argc, char *argv[])
     // Config::SetDefault ("ns3::DropTailQueue<Packet>::MaxSize", QueueSizeValue{QueueSize {"4096p"}});
 
     std::vector<std::string> traffModels {
-        "GoogleRPC",
         "AliStorage",
+        "GoogleRPC",
         "WebSearch",
         "FacebookHadoop"
     };
@@ -175,7 +175,7 @@ main (int argc, char *argv[])
         10'000, 100'000, 1'000'000
     };
     for (const auto &traffModel : traffModels) {
-        std::string file = "/home/cyang/ns-3-dev/scratch/a/traff-" + traffModel + ".txt";
+        std::string file = "scratch/measure-sim/traff-" + traffModel + ".txt";
         for (auto memSize : memorySize) {
             int tableEntryCnt = memSize / 25;
             std::cout << "\n\n========"
