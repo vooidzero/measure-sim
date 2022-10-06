@@ -1,4 +1,3 @@
-#include "BaseMidDevApp.h"
 #include "ns3/application-container.h"
 #include "ns3/core-module.h"
 #include "ns3/point-to-point-module.h"
@@ -10,6 +9,7 @@
 #include "ns3/node-container.h"
 #include "ns3/node.h"
 
+#include <cstdint>
 #include <memory>
 #include <ostream>
 #include <fstream>
@@ -22,12 +22,20 @@ using namespace ns3;
 
 std::string linkRate = "25Gbps";
 std::string linkDelay = "1us";
-constexpr int SENDER_CNT = 8;
 
 void
 run (std::string traffFileName, int hashTableSize)
 {
-    NodeContainer senderNodes{SENDER_CNT};
+    std::ifstream traffFile{traffFileName};
+    if (!traffFile.is_open()) {
+        std::cout << "Failed to open " << traffFileName << std::endl;
+        return;
+    }
+    int flowCnt = 0;
+    traffFile >> flowCnt;
+    int senderCnt = (flowCnt + 64999) / 65000;
+
+    NodeContainer senderNodes{(uint32_t)senderCnt};
     auto middleNode = CreateObject<Node>();
     auto receiverNode = CreateObject<Node>();
     NetDeviceContainer senderNetDevices;
@@ -36,7 +44,7 @@ run (std::string traffFileName, int hashTableSize)
     PointToPointHelper p2p;
     p2p.SetDeviceAttribute ("DataRate", StringValue {linkRate});
     p2p.SetChannelAttribute ("Delay", StringValue {linkDelay});
-    for (int i = 0; i < SENDER_CNT; i++) {
+    for (int i = 0; i < senderCnt; i++) {
         NetDeviceContainer devs = p2p.Install ({senderNodes.Get(i), middleNode});
         senderNetDevices.Add(devs.Get(0));
         senderSidePorts.Add(devs.Get(1));
@@ -50,7 +58,7 @@ run (std::string traffFileName, int hashTableSize)
     stack.Install(receiverNode);
 
     Ipv4AddressHelper address;
-    for (int i = 0; i < SENDER_CNT; i++) {
+    for (int i = 0; i < senderCnt; i++) {
         uint32_t net = (10U << 24) | (i << 2);
         uint32_t mask = ~((1U << 2) - 1);
         address.SetBase (Ipv4Address{net}, mask);
@@ -64,20 +72,6 @@ run (std::string traffFileName, int hashTableSize)
 
     uint16_t recvPort = 9;
     int64_t genTotalBytes = 0;
-    std::ifstream traffFile{traffFileName};
-    if (!traffFile.is_open()) {
-        std::cout << "Failed to open " << traffFileName << std::endl;
-        Simulator::Destroy ();
-        return;
-    }
-    int flowCnt = 0;
-    traffFile >> flowCnt;
-    if (flowCnt > SENDER_CNT * 65000) {
-        std::cout << "ERROR: number of flows(" << flowCnt <<  ") is larger than expected."
-                  << "Please use a larger SENDER_CNT\n";
-        Simulator::Destroy ();
-        return;
-    }
     for (int i = 0; i < flowCnt; i++) {
         double ts;
         int srcMachine, dstMachine;
@@ -87,8 +81,8 @@ run (std::string traffFileName, int hashTableSize)
         uint16_t dstPort = recvPort;
         InetSocketAddress dstSockAddr = {receiverAddr, dstPort};
         BulkSendHelper source{"ns3::TcpSocketFactory", dstSockAddr};
-        int sender = i % SENDER_CNT;
-        uint16_t srcPort = 13 + ((i / SENDER_CNT) % 65000);
+        int sender = i % senderCnt;
+        uint16_t srcPort = 13 + ((i / senderCnt) % 65000);
         InetSocketAddress srcSockAddr{Ipv4Address::GetAny(), srcPort};
         source.SetAttribute ("Local", AddressValue{srcSockAddr});
         source.SetAttribute ("MaxBytes", UintegerValue{flowSize});
@@ -109,7 +103,7 @@ run (std::string traffFileName, int hashTableSize)
     int64_t txPktCnt = 0;
     int64_t txByteCnt = 0;
     int64_t txPktSizeHist[32] = {0};
-    int64_t nextTs = Seconds(1.4).GetNanoSeconds();
+    int64_t nextTs = Seconds(1.2).GetNanoSeconds();
     auto txCb = [&](Ptr<const Packet> pkt) {
         txPktCnt++;
         txByteCnt += pkt->GetSize();
@@ -124,10 +118,10 @@ run (std::string traffFileName, int hashTableSize)
                       << midApp.GetExtraByteCnt() << " B" << std::endl;
             std::cout << "total flows: " << midApp.GetTotalFlowCnt()
                       << ", current: " << midApp.GetCurrFlowCnt()
-                      << ", active: " << midApp.PollActiveFlowCnt()
+                      << ", actived: " << midApp.PollActiveFlowCnt()
                       << std::endl;
             std::cout << std::endl;
-            nextTs += (int64_t)4e8;
+            nextTs += (int64_t)2e8;
         }
     };
     auto ns3Callback = MakeCallbackFromCallable (txCb);
@@ -167,9 +161,7 @@ main (int argc, char *argv[])
 
     std::vector<std::string> traffModels {
         "AliStorage",
-        "GoogleRPC",
-        "WebSearch",
-        "FacebookHadoop"
+        "GoogleRPC"
     };
     std::vector<int> memorySize{
         10'000, 100'000, 1'000'000
