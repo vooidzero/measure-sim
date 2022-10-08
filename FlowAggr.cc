@@ -6,9 +6,6 @@
 #include "ns3/ipv4-l3-protocol.h"
 #include "ns3/tcp-header.h"
 #include <algorithm>
-#include <chrono>
-#include <cstddef>
-#include <ostream>
 #include <queue>
 
 NS_LOG_COMPONENT_DEFINE ("FlowAggr");

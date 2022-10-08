@@ -1,5 +1,6 @@
 #include "ns3/application-container.h"
 #include "ns3/core-module.h"
+#include "ns3/simulator.h"
 #include "ns3/point-to-point-module.h"
 #include "ns3/applications-module.h"
 #include "ns3/network-module.h"
@@ -10,10 +11,7 @@
 #include "ns3/node.h"
 
 #include <chrono>
-#include <cstdint>
-#include <iomanip>
 #include <memory>
-#include <ostream>
 #include <fstream>
 #include <string>
 #include <vector>
@@ -21,24 +19,24 @@
 #include "FlowAggr.h"
 #include "MakeCallbackHelper.h"
 
+
 using namespace ns3;
+using std::string;
+using std::vector;
+using std::pair;
 
 int zip = 1;
 
-std::string linkRate = "25Gbps";
-std::string linkDelay = "1us";
-using std::vector;
-using std::pair;
-using std::chrono::microseconds;
-
-inline std::ostream& operator<<(std::ostream &os, microseconds us) {
-    os << us.count() << "us";
-    return os;
-}
+string linkRate = "25Gbps";
+string linkDelay = "1us";
 
 void
-run (std::string traffFileName, vector<pair<int, microseconds>> hashTableArgs)
+run (string traffFileName, vector<pair<int, microseconds>> hashTableArgs)
 {
+    microseconds measureDuration = microseconds{100ms} / zip;
+    microseconds measureEndTime = 1s + microseconds{1s} / zip;
+    microseconds measureStartTime = measureEndTime - measureDuration;
+
     std::ifstream traffFile{traffFileName};
     if (!traffFile.is_open()) {
         std::cout << "Failed to open " << traffFileName << std::endl;
@@ -104,27 +102,29 @@ run (std::string traffFileName, vector<pair<int, microseconds>> hashTableArgs)
         sourceApps.Start (Seconds(ts));
 
         if (i == flowCnt - 1) {
-            std::cout << "lastLine: ts=" << ts << "\n";
+            std::cout << "lastOne: ts=" << ts << "\n";
         }
     }
     traffFile.close();
     std::cout << "Generate: " << flowCnt << " flows, " << genTotalBytes << " B\n";
-
 
     InetSocketAddress sinkAddr{Ipv4Address::GetAny(), recvPort};
     PacketSinkHelper sink{"ns3::TcpSocketFactory", sinkAddr};
     ApplicationContainer sinkApps = sink.Install(receiverNode);
     sinkApps.Start(Seconds (0.0));
 
-    std::vector<std::unique_ptr<FlowAggr>> midApps;
+    vector<std::unique_ptr<FlowAggr>> midApps;
     for (auto [sz, ttl] : hashTableArgs) {
         midApps.push_back(std::make_unique<FlowAggr>(sz, ttl));
     }
     int64_t txPktCnt = 0;
     int64_t txByteCnt = 0;
     int64_t txPktSizeHist[32] = {0};
-    int64_t nextTs = Seconds(1.2).GetNanoSeconds();
     auto txCb = [&](Ptr<const Packet> pkt) {
+        microseconds now{Now().GetMicroSeconds()};
+        if (now < measureStartTime) {
+            return;
+        }
         txPktCnt++;
         txByteCnt += pkt->GetSize();
         auto i = pkt->GetSize() / 100;
@@ -133,29 +133,11 @@ run (std::string traffFileName, vector<pair<int, microseconds>> hashTableArgs)
         for (auto &midApp : midApps) {
             midApp->HandlePacket(copiedPkt);
         }
-        
-        if (Now().GetNanoSeconds() > nextTs) {
-            std::cout << "Until " << NanoSeconds(nextTs).GetSeconds() << " second\n";
-            std::cout << "TX: " << txPktCnt << " packets, "
-                      << txByteCnt << " B" << std::endl;
-            for (int i = 0; i < (int)midApps.size(); i++) {
-                auto &midApp = midApps[i];
-                std::cout << "table=" << hashTableArgs[i].first << "," << hashTableArgs[i].second
-                        << "; records: " << midApp->GetRecordCnt()
-                        << ", expires: " << midApp->GetExpirCnt()
-                        << ", collisions: " << midApp->GetCollisionCnt()
-                        << ", total flows: " << midApp->GetTotalFlowCnt()
-                        << ", actived: " << midApp->PollActiveFlowCnt()
-                        << ", current: " << midApp->GetCurrFlowCnt()
-                        << std::endl;
-            }
-            std::cout << std::endl;
-            nextTs += (int64_t)2e8;
-        }
     };
     auto ns3Callback = MakeCallbackFromCallable (txCb);
     receiverSidePort->TraceConnectWithoutContext("PhyTxBegin", ns3Callback);
 
+    Simulator::Stop(toNsTime(measureEndTime));
     // =======================================================================================================
     Simulator::Run ();
     Simulator::Destroy ();
@@ -167,11 +149,11 @@ run (std::string traffFileName, vector<pair<int, microseconds>> hashTableArgs)
         std::cout << "records: " << midApp->GetRecordCnt()
                 << ", expires: " << midApp->GetExpirCnt()
                 << ", collisions: " << midApp->GetCollisionCnt()
-                << std::endl;
+                << "\n\n\n";
         if (i == (int)midApps.size() - 1) {
+            std::cout << "flowCnt" << midApp->GetTotalFlowCnt();
             midApp->PrintFlowDurationStats();
         }
-        std::cout << "\n\n";
     }
     /*std::cout << "======== Packet Size Distribution ========\n";
     for (int i = 0; i < 16; i++) {
@@ -194,7 +176,7 @@ main (int argc, char *argv[])
     Config::SetDefault ("ns3::TcpSocket::ConnTimeout", TimeValue {Seconds(1)});
     // Config::SetDefault ("ns3::DropTailQueue<Packet>::MaxSize", QueueSizeValue{QueueSize {"4096p"}});
 
-    std::vector<std::string> traffModels {
+    vector<string> traffModels {
         "AliStorage"
     };
     vector<pair<int, microseconds>> hashTableArgs;
@@ -205,7 +187,7 @@ main (int argc, char *argv[])
     }
     
     for (const auto &traffModel : traffModels) {
-        std::string file = "scratch/measure-sim/traff-" + traffModel + ".txt";
+        string file = "scratch/measure-sim/traff-" + traffModel + ".txt";
         std::cout << "\n\n========" << " model=" << traffModel << " ========\n";
         run(file, hashTableArgs);
     }

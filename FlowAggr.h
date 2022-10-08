@@ -4,16 +4,14 @@
 #include "ns3/packet.h"
 #include "ns3/tcp-l4-protocol.h"
 #include "ns3/udp-l4-protocol.h"
-#include <chrono>
 #include <memory>
 #include <ratio>
 #include <set>
 #include <tuple>
 #include <vector>
+#include "TimeHelper.h"
 
 using namespace ns3;
-using std::chrono::microseconds;
-using std::literals::chrono_literals::operator""us;
 
 struct FlowTuple;
 
