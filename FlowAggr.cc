@@ -16,14 +16,10 @@ FlowAggr::FlowAggr(int hashTableSize, microseconds ttl)
     m_hashTable{new Record[hashTableSize]}
 {}
 
-int64_t FlowAggr::PollActiveFlowCnt() {
-    auto ret = m_activeFlowSet.size();
-    m_activeFlowSet.clear();
-    return ret;
-}
-
 void FlowAggr::OutputRecord(const Record &record) {
-    m_recordCnt++;
+    if (m_statsEnabled) {
+        m_recordCnt++;
+    }
 }
 
 void FlowAggr::DoRecord(const FlowTuple &flow, int byteCnt, bool flush) {
@@ -32,11 +28,14 @@ void FlowAggr::DoRecord(const FlowTuple &flow, int byteCnt, bool flush) {
     auto &cell = m_hashTable[idx];
     if (cell.IsValid()) {
         bool isExpired = (m_ttl > 0us && now - microseconds{cell.startTime} > m_ttl);
-        if (flow != cell.flow) {
-            m_collisionCnt++;
-        } else if (isExpired) {
-            m_expirCnt++;
+        if (m_statsEnabled) {
+            if (flow != cell.flow) {
+                m_collisionCnt++;
+            } else if (isExpired) {
+                m_expirCnt++;
+            }
         }
+        
         if (flow != cell.flow || isExpired) {
             OutputRecord(cell);
             cell.Reset(); // set cell to invalid
@@ -82,20 +81,20 @@ void FlowAggr::HandlePacket(Ptr<Packet> pkt) {
         uint8_t flags = tcpHdr.GetFlags();
         bool shouldFlush = ((flags & shouldFlushMask) != 0);
         DoRecord(flow, pkt->GetSize(), shouldFlush);
-        if ((flags & TcpHeader::FIN) == 0) {
-            m_activeFlowSet.insert(flow);
-        }
 
-        auto ts = Now().GetNanoSeconds();
-        if (flags & TcpHeader::SYN) {
-            if (!m_concurrentFlowSet.count(flow)) {
+        if (m_statsEnabled) {
+            auto ts = Now().GetNanoSeconds();
+            bool isFin = ((flags & TcpHeader::FIN) != 0);
+            bool existed = (m_concurrentFlowSet.count(flow) != 0);
+            if (isFin && existed) {
+                m_totalFlowCnt--;
+                m_concurrentFlowSet.erase(flow);
+                m_concurrentFlowCntStats.push_back({ts, m_concurrentFlowSet.size()});
+            } else if (!isFin && !existed) {
                 m_totalFlowCnt++;
                 m_concurrentFlowSet.insert(flow);
                 m_concurrentFlowCntStats.push_back({ts, m_concurrentFlowSet.size()});
             }
-        } else if ((flags & TcpHeader::FIN) && m_concurrentFlowSet.count(flow)) {
-            m_concurrentFlowSet.erase(flow);
-            m_concurrentFlowCntStats.push_back({ts, m_concurrentFlowSet.size()});
         }
 
         pkt->AddHeader(tcpHdr);
@@ -106,16 +105,12 @@ void FlowAggr::HandlePacket(Ptr<Packet> pkt) {
 
 void FlowAggr::PrintFlowDurationStats() const {
     if (m_concurrentFlowCntStats.size() == 0) {
-        std::cout << "No record" << std::endl;
-        return;
-    }
-    if (m_concurrentFlowSet.size() != 0) {
-        std::cout << "!!! ActiveFlowSet is not empty (size=" << m_concurrentFlowSet.size() << std::endl;
+        std::cout << "No stats data\n";
         return;
     }
     auto totalDuration = m_concurrentFlowCntStats.back().first - m_concurrentFlowCntStats.front().first;
-    std::cout << "total duration: " << totalDuration << std::endl;
-    std::cout << "total flow count: " << m_totalFlowCnt << std::endl;
+    std::cout << "duration: " << totalDuration << "ns"
+            << ", flow count: " << m_totalFlowCnt << std::endl;
 
     int64_t maxConcurrentFlowCnt = 0;
     for (auto [_, flowCnt] : m_concurrentFlowCntStats) {
@@ -138,7 +133,6 @@ void FlowAggr::PrintFlowDurationStats() const {
     }
     int64_t avgConcurrentFlowCnt = accum / totalDuration;
     std::cout << "average number of concurrent flows: " << avgConcurrentFlowCnt << std::endl;
-
 
     if (maxConcurrentFlowCnt < 20) {
         for (int i = 1; i < (int)durationStats.size(); i++) {

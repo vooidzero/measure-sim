@@ -21,9 +21,13 @@ public:
     ~FlowAggr() = default;
 
     void HandlePacket(Ptr<Packet> pkt);
+
+    void enableStats() { m_statsEnabled = true; }
+
     int GetRecordCnt() const { return m_recordCnt; }
     int GetExpirCnt() const { return m_expirCnt; }
     int GetCollisionCnt() const { return m_collisionCnt; }
+
     int64_t PollActiveFlowCnt();
     int GetTotalFlowCnt() const { return m_totalFlowCnt; }
     int GetCurrFlowCnt() const { return m_concurrentFlowSet.size(); }
@@ -35,12 +39,15 @@ private:
 
     static constexpr int MAX_PAYLOAD_SIZE = 1500 - 40;
     
-    int m_recordCnt = 0;
-    int m_expirCnt = 0;
-    int m_collisionCnt = 0;
     int m_hashTableSize;
     microseconds m_ttl;
     std::unique_ptr<Record[]> m_hashTable;
+
+    bool m_statsEnabled = false;
+
+    int m_recordCnt = 0;
+    int m_expirCnt = 0;
+    int m_collisionCnt = 0;
 
     int64_t m_extraPktCnt = 0;
     int64_t m_extraByteCnt = 0;
@@ -48,7 +55,6 @@ private:
     /* accurate statistics of the traffic */
     int m_totalFlowCnt = 0;
     std::set<FlowTuple> m_concurrentFlowSet;
-    std::set<FlowTuple> m_activeFlowSet;
     std::vector<std::pair<int64_t, int64_t>> m_concurrentFlowCntStats; // <timeStamp, concurrentFlowCnt>
 
     void DoRecord(const FlowTuple &flow, int byteCnt, bool flush = false);

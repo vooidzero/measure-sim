@@ -1,3 +1,4 @@
+#include "TimeHelper.h"
 #include "ns3/application-container.h"
 #include "ns3/core-module.h"
 #include "ns3/simulator.h"
@@ -33,7 +34,7 @@ string linkDelay = "1us";
 void
 run (string traffFileName, vector<pair<int, microseconds>> hashTableArgs)
 {
-    microseconds measureDuration = microseconds{100ms} / zip;
+    microseconds measureDuration = microseconds{500ms} / zip;
     microseconds measureEndTime = 1s + microseconds{1s} / zip;
     microseconds measureStartTime = measureEndTime - measureDuration;
 
@@ -117,18 +118,32 @@ run (string traffFileName, vector<pair<int, microseconds>> hashTableArgs)
     for (auto [sz, ttl] : hashTableArgs) {
         midApps.push_back(std::make_unique<FlowAggr>(sz, ttl));
     }
-    int64_t txPktCnt = 0;
-    int64_t txByteCnt = 0;
-    int64_t txPktSizeHist[32] = {0};
+    int64_t totalTxPktCnt = 0;
+    int64_t totalTxByteCnt = 0;
+    int64_t pastTxPktCnt = 0;
+    int64_t pastTxByteCnt = 0;
+    int64_t txPktSizeHist[16] = {0};
+    microseconds prevTs{0};
     auto txCb = [&](Ptr<const Packet> pkt) {
         microseconds now{Now().GetMicroSeconds()};
-        if (now < measureStartTime) {
-            return;
+        if (prevTs < measureStartTime && now >= measureStartTime) {
+            pastTxByteCnt = totalTxByteCnt;
+            pastTxPktCnt = totalTxPktCnt;
+            for (auto &x : txPktSizeHist) {
+                x = 0;
+            }
+            for (auto &midApp : midApps) {
+                midApp->enableStats();
+            }
         }
-        txPktCnt++;
-        txByteCnt += pkt->GetSize();
+        prevTs = now;
+
+        totalTxPktCnt++;
+        totalTxByteCnt += pkt->GetSize();
+
         auto i = pkt->GetSize() / 100;
         txPktSizeHist[i]++;
+
         auto copiedPkt = pkt->Copy();
         for (auto &midApp : midApps) {
             midApp->HandlePacket(copiedPkt);
@@ -141,8 +156,13 @@ run (string traffFileName, vector<pair<int, microseconds>> hashTableArgs)
     // =======================================================================================================
     Simulator::Run ();
     Simulator::Destroy ();
-    
-    std::cout << "TX: " << txPktCnt << " packets, " << txByteCnt << " B" << std::endl;
+
+    std::cout << "total TX: " << totalTxPktCnt << " packets, "
+              << totalTxByteCnt << " B" << std::endl;
+    std::cout << "from " << toNsTime(measureStartTime).GetSeconds() << "s"
+            << " to " <<  toNsTime(measureEndTime).GetSeconds() << "s\n";
+    std::cout << "TX: " << totalTxPktCnt - pastTxPktCnt << " packets, "
+              << totalTxByteCnt - pastTxByteCnt << " B" << std::endl;
     for (int i = 0; i < (int)midApps.size(); i++) {
         auto &midApp = midApps[i];
         std::cout << "======== " << "table=" << hashTableArgs[i].first << "," << hashTableArgs[i].second << " ========\n";
@@ -151,14 +171,13 @@ run (string traffFileName, vector<pair<int, microseconds>> hashTableArgs)
                 << ", collisions: " << midApp->GetCollisionCnt()
                 << "\n\n\n";
         if (i == (int)midApps.size() - 1) {
-            std::cout << "flowCnt" << midApp->GetTotalFlowCnt();
             midApp->PrintFlowDurationStats();
         }
     }
-    /*std::cout << "======== Packet Size Distribution ========\n";
+    std::cout << "\n\n======== Packet Size Distribution ========\n";
     for (int i = 0; i < 16; i++) {
         std::cout << i * 100 << "~" << (i+1)*100 << ": " << txPktSizeHist[i] << std::endl;
-    }*/
+    }
 }
 
 
@@ -168,7 +187,7 @@ main (int argc, char *argv[])
     CommandLine cmd (__FILE__);
     // cmd.AddValue ("linkRate", "link bandwith", linkRate);
     // cmd.AddValue ("linkDelay", "link delay", linkDelay);
-    cmd.AddValue ("zip", "zip rate (e.g. 1, 2, 4, ...)", zip);
+    cmd.AddValue ("zip", "zip ratio (e.g. 1, 2, 4, ...)", zip);
     cmd.Parse (argc, argv);
 
     Time::SetResolution (Time::NS);
