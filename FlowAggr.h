@@ -23,9 +23,9 @@ public:
     ~FlowAggr() = default;
 
     void HandlePacket(Ptr<Packet> pkt);
-
-    int64_t GetExtraPktCnt() const;
-    int64_t GetExtraByteCnt() const;
+    int GetRecordCnt() const { return m_recordCnt; }
+    int GetExpirCnt() const { return m_expirCnt; }
+    int GetCollisionCnt() const { return m_collisionCnt; }
     int64_t PollActiveFlowCnt();
     int GetTotalFlowCnt() const { return m_totalFlowCnt; }
     int GetCurrFlowCnt() const { return m_concurrentFlowSet.size(); }
@@ -36,8 +36,10 @@ private:
     struct Record;
 
     static constexpr int MAX_PAYLOAD_SIZE = 1500 - 40;
-
-    Buffer m_buffer;
+    
+    int m_recordCnt = 0;
+    int m_expirCnt = 0;
+    int m_collisionCnt = 0;
     int m_hashTableSize;
     microseconds m_ttl;
     std::unique_ptr<Record[]> m_hashTable;
@@ -121,7 +123,7 @@ inline std::ostream& operator<< (std::ostream &out, const FlowTuple &flow) {
 
 struct FlowAggr::Record {
     FlowTuple flow;
-    uint16_t startTime = 0;
+    uint32_t startTime = 0;
     uint16_t endTime = 0;
     uint32_t pktCnt = 0;
     uint32_t byteCnt = 0;

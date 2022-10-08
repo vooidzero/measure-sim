@@ -9,22 +9,35 @@
 #include "ns3/node-container.h"
 #include "ns3/node.h"
 
+#include <chrono>
 #include <cstdint>
+#include <iomanip>
 #include <memory>
 #include <ostream>
 #include <fstream>
 #include <string>
+#include <vector>
 
 #include "FlowAggr.h"
 #include "MakeCallbackHelper.h"
 
 using namespace ns3;
 
+int zip = 1;
+
 std::string linkRate = "25Gbps";
 std::string linkDelay = "1us";
+using std::vector;
+using std::pair;
+using std::chrono::microseconds;
+
+inline std::ostream& operator<<(std::ostream &os, microseconds us) {
+    os << us.count() << "us";
+    return os;
+}
 
 void
-run (std::string traffFileName, int hashTableSize)
+run (std::string traffFileName, vector<pair<int, microseconds>> hashTableArgs)
 {
     std::ifstream traffFile{traffFileName};
     if (!traffFile.is_open()) {
@@ -77,6 +90,7 @@ run (std::string traffFileName, int hashTableSize)
         int srcMachine, dstMachine;
         uint64_t flowSize;
         traffFile >> ts >> srcMachine >> dstMachine >> flowSize;
+        ts = 1 + (ts - 1) / zip;
         genTotalBytes += flowSize;
         uint16_t dstPort = recvPort;
         InetSocketAddress dstSockAddr = {receiverAddr, dstPort};
@@ -88,18 +102,24 @@ run (std::string traffFileName, int hashTableSize)
         source.SetAttribute ("MaxBytes", UintegerValue{flowSize});
         ApplicationContainer sourceApps = source.Install(senderNodes.Get(sender));
         sourceApps.Start (Seconds(ts));
+
+        if (i == flowCnt - 1) {
+            std::cout << "lastLine: ts=" << ts << "\n";
+        }
     }
     traffFile.close();
     std::cout << "Generate: " << flowCnt << " flows, " << genTotalBytes << " B\n";
 
-    for (uint16_t i = 1; i <= 16; i++) {
-        InetSocketAddress sinkAddr{Ipv4Address::GetAny(), i};
-        PacketSinkHelper sink{"ns3::TcpSocketFactory", sinkAddr};
-        ApplicationContainer sinkApps = sink.Install(receiverNode);
-        sinkApps.Start (Seconds (0.0));
-    }
 
-    FlowAggr midApp{hashTableSize};
+    InetSocketAddress sinkAddr{Ipv4Address::GetAny(), recvPort};
+    PacketSinkHelper sink{"ns3::TcpSocketFactory", sinkAddr};
+    ApplicationContainer sinkApps = sink.Install(receiverNode);
+    sinkApps.Start(Seconds (0.0));
+
+    std::vector<std::unique_ptr<FlowAggr>> midApps;
+    for (auto [sz, ttl] : hashTableArgs) {
+        midApps.push_back(std::make_unique<FlowAggr>(sz, ttl));
+    }
     int64_t txPktCnt = 0;
     int64_t txByteCnt = 0;
     int64_t txPktSizeHist[32] = {0};
@@ -109,17 +129,26 @@ run (std::string traffFileName, int hashTableSize)
         txByteCnt += pkt->GetSize();
         auto i = pkt->GetSize() / 100;
         txPktSizeHist[i]++;
-        midApp.HandlePacket(pkt->Copy());
+        auto copiedPkt = pkt->Copy();
+        for (auto &midApp : midApps) {
+            midApp->HandlePacket(copiedPkt);
+        }
+        
         if (Now().GetNanoSeconds() > nextTs) {
             std::cout << "Until " << NanoSeconds(nextTs).GetSeconds() << " second\n";
             std::cout << "TX: " << txPktCnt << " packets, "
                       << txByteCnt << " B" << std::endl;
-            std::cout << "extra: " << midApp.GetExtraPktCnt() << " packets, "
-                      << midApp.GetExtraByteCnt() << " B" << std::endl;
-            std::cout << "total flows: " << midApp.GetTotalFlowCnt()
-                      << ", current: " << midApp.GetCurrFlowCnt()
-                      << ", actived: " << midApp.PollActiveFlowCnt()
-                      << std::endl;
+            for (int i = 0; i < (int)midApps.size(); i++) {
+                auto &midApp = midApps[i];
+                std::cout << "table=" << hashTableArgs[i].first << "," << hashTableArgs[i].second
+                        << "; records: " << midApp->GetRecordCnt()
+                        << ", expires: " << midApp->GetExpirCnt()
+                        << ", collisions: " << midApp->GetCollisionCnt()
+                        << ", total flows: " << midApp->GetTotalFlowCnt()
+                        << ", actived: " << midApp->PollActiveFlowCnt()
+                        << ", current: " << midApp->GetCurrFlowCnt()
+                        << std::endl;
+            }
             std::cout << std::endl;
             nextTs += (int64_t)2e8;
         }
@@ -132,17 +161,22 @@ run (std::string traffFileName, int hashTableSize)
     Simulator::Destroy ();
     
     std::cout << "TX: " << txPktCnt << " packets, " << txByteCnt << " B" << std::endl;
-    std::cout << "extra: " << midApp.GetExtraByteCnt() << " packets, "
-              << midApp.GetExtraByteCnt() << " B" << std::endl;
-    if (txByteCnt != 0) {
-        std::cout << "overhead: " << (double)midApp.GetExtraByteCnt() / txByteCnt << std::endl;
+    for (int i = 0; i < (int)midApps.size(); i++) {
+        auto &midApp = midApps[i];
+        std::cout << "======== " << "table=" << hashTableArgs[i].first << "," << hashTableArgs[i].second << " ========\n";
+        std::cout << "records: " << midApp->GetRecordCnt()
+                << ", expires: " << midApp->GetExpirCnt()
+                << ", collisions: " << midApp->GetCollisionCnt()
+                << std::endl;
+        if (i == (int)midApps.size() - 1) {
+            midApp->PrintFlowDurationStats();
+        }
+        std::cout << "\n\n";
     }
     /*std::cout << "======== Packet Size Distribution ========\n";
     for (int i = 0; i < 16; i++) {
         std::cout << i * 100 << "~" << (i+1)*100 << ": " << txPktSizeHist[i] << std::endl;
     }*/
-    
-    midApp.PrintFlowDurationStats();
 }
 
 
@@ -152,6 +186,7 @@ main (int argc, char *argv[])
     CommandLine cmd (__FILE__);
     // cmd.AddValue ("linkRate", "link bandwith", linkRate);
     // cmd.AddValue ("linkDelay", "link delay", linkDelay);
+    cmd.AddValue ("zip", "zip rate (e.g. 1, 2, 4, ...)", zip);
     cmd.Parse (argc, argv);
 
     Time::SetResolution (Time::NS);
@@ -160,22 +195,18 @@ main (int argc, char *argv[])
     // Config::SetDefault ("ns3::DropTailQueue<Packet>::MaxSize", QueueSizeValue{QueueSize {"4096p"}});
 
     std::vector<std::string> traffModels {
-        "AliStorage",
-        "GoogleRPC"
+        "AliStorage"
     };
-    std::vector<int> memorySize{
-        10'000, 100'000, 1'000'000
-    };
+    vector<pair<int, microseconds>> hashTableArgs;
+    for (microseconds ttl : {50us, 250us, 1'000us, 50'000us, -1us}) {
+        for (int size : {400, 4'000, 40'000}) {
+            hashTableArgs.emplace_back(size, ttl);
+        }
+    }
+    
     for (const auto &traffModel : traffModels) {
         std::string file = "scratch/measure-sim/traff-" + traffModel + ".txt";
-        for (auto memSize : memorySize) {
-            int tableEntryCnt = memSize / 25;
-            std::cout << "\n\n========"
-                      << " model=" << traffModel
-                      << " memSize=" << memSize
-                      << "(tableEntryCnt=" << tableEntryCnt
-                      << "========\n";
-            run(file, tableEntryCnt);
-        }
+        std::cout << "\n\n========" << " model=" << traffModel << " ========\n";
+        run(file, hashTableArgs);
     }
 }

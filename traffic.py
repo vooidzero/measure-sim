@@ -108,7 +108,7 @@ if __name__ == "__main__":
         while True:
             inter_t = int(poisson(avg_inter_arrival))
             t += inter_t
-            if t > time + base_t:
+            if t > base_t + time:
                 break
             size = int(customRand.rand())
             if size <= 0:

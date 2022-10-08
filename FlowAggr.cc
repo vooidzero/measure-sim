@@ -7,29 +7,17 @@
 #include "ns3/tcp-header.h"
 #include <algorithm>
 #include <chrono>
+#include <cstddef>
 #include <ostream>
 #include <queue>
 
 NS_LOG_COMPONENT_DEFINE ("FlowAggr");
 
 FlowAggr::FlowAggr(int hashTableSize, microseconds ttl)
-    : m_buffer{},
-    m_hashTableSize{hashTableSize},
+    : m_hashTableSize{hashTableSize},
     m_ttl{ttl},
     m_hashTable{new Record[hashTableSize]}
 {}
-
-int64_t FlowAggr::GetExtraPktCnt() const {
-    if (m_buffer.GetSize() != 0) {
-        return m_extraPktCnt + 1;
-    } else {
-        return m_extraPktCnt;
-    }
-}
-
-int64_t FlowAggr::GetExtraByteCnt() const {
-    return m_extraByteCnt + m_buffer.GetSize();
-}
 
 int64_t FlowAggr::PollActiveFlowCnt() {
     auto ret = m_activeFlowSet.size();
@@ -38,28 +26,20 @@ int64_t FlowAggr::PollActiveFlowCnt() {
 }
 
 void FlowAggr::OutputRecord(const Record &record) {
-    /// dose not really send packet currently
-
-    NS_LOG_INFO("Output Record " << record.flow << ",size=" << record.byteCnt << "B");
-    record.AppendToBuffer(m_buffer);
-
-    // send report packet if buffer cannot hold one more record
-    auto size = m_buffer.GetSize();
-    if (size + Record::SerializedSize > MAX_PAYLOAD_SIZE) {
-        std::unique_ptr<uint8_t[]> buf{new uint8_t[size]};
-        m_buffer.CopyData(buf.get(), size);
-        m_extraPktCnt += 1;
-        m_extraByteCnt += size + 42;
-        m_buffer = Buffer{};
-    }
+    m_recordCnt++;
 }
 
 void FlowAggr::DoRecord(const FlowTuple &flow, int byteCnt, bool flush) {
     uint32_t idx = flow.GetHashValue() % m_hashTableSize;
     microseconds now{Now().GetMicroSeconds()};
     auto &cell = m_hashTable[idx];
-    if (cell.IsValid() && flow != cell.flow) {
-        bool isExpired = (m_ttl > 0us && microseconds{cell.endTime} - now > m_ttl);
+    if (cell.IsValid()) {
+        bool isExpired = (m_ttl > 0us && now - microseconds{cell.startTime} > m_ttl);
+        if (flow != cell.flow) {
+            m_collisionCnt++;
+        } else if (isExpired) {
+            m_expirCnt++;
+        }
         if (flow != cell.flow || isExpired) {
             OutputRecord(cell);
             cell.Reset(); // set cell to invalid
@@ -136,7 +116,6 @@ void FlowAggr::PrintFlowDurationStats() const {
         std::cout << "!!! ActiveFlowSet is not empty (size=" << m_concurrentFlowSet.size() << std::endl;
         return;
     }
-
     auto totalDuration = m_concurrentFlowCntStats.back().first - m_concurrentFlowCntStats.front().first;
     std::cout << "total duration: " << totalDuration << std::endl;
     std::cout << "total flow count: " << m_totalFlowCnt << std::endl;
