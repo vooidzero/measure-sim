@@ -1,23 +1,21 @@
-#include "TimeHelper.h"
+
 #include "ns3/application-container.h"
 #include "ns3/core-module.h"
+#include "ns3/nstime.h"
 #include "ns3/simulator.h"
 #include "ns3/point-to-point-module.h"
 #include "ns3/applications-module.h"
 #include "ns3/network-module.h"
 #include "ns3/internet-module.h"
-
-#include "ns3/csma-module.h"
 #include "ns3/node-container.h"
 #include "ns3/node.h"
 
-#include <chrono>
 #include <memory>
 #include <fstream>
 #include <string>
 #include <vector>
 
-#include "FlowAggr.h"
+#include "FlowTable.h"
 #include "MakeCallbackHelper.h"
 
 
@@ -28,15 +26,15 @@ using std::pair;
 
 int zip = 1;
 
-string linkRate = "25Gbps";
-string linkDelay = "1us";
+string linkRate = "100Gbps";
+string linkDelay = "500ns";
 
 void
 run (string traffFileName, vector<pair<int, microseconds>> hashTableArgs)
 {
-    microseconds measureDuration = microseconds{500ms} / zip;
-    microseconds measureEndTime = 1s + microseconds{1s} / zip;
-    microseconds measureStartTime = measureEndTime - measureDuration;
+    Time measureDuration = MilliSeconds(500) / zip;
+    Time measureEndTime = Seconds(1) + Seconds(1) / zip;
+    Time measureStartTime = measureEndTime - measureDuration;
 
     std::ifstream traffFile{traffFileName};
     if (!traffFile.is_open()) {
@@ -112,27 +110,30 @@ run (string traffFileName, vector<pair<int, microseconds>> hashTableArgs)
     InetSocketAddress sinkAddr{Ipv4Address::GetAny(), recvPort};
     PacketSinkHelper sink{"ns3::TcpSocketFactory", sinkAddr};
     ApplicationContainer sinkApps = sink.Install(receiverNode);
-    sinkApps.Start(Seconds (0.0));
+    sinkApps.Start(Seconds (0));
 
-    vector<std::unique_ptr<FlowAggr>> midApps;
+    vector<std::unique_ptr<FlowTable>> flowTables;
     for (auto [sz, ttl] : hashTableArgs) {
-        midApps.push_back(std::make_unique<FlowAggr>(sz, ttl));
+        flowTables.push_back(std::make_unique<FlowTable>(sz, ttl));
     }
+    FlowStats flowStats;
+    flowStats.setStatsStartTime(measureStartTime);
+
     int64_t totalTxPktCnt = 0;
     int64_t totalTxByteCnt = 0;
     int64_t pastTxPktCnt = 0;
     int64_t pastTxByteCnt = 0;
     int64_t txPktSizeHist[16] = {0};
-    microseconds prevTs{0};
+    Time prevTs{0};
     auto txCb = [&](Ptr<const Packet> pkt) {
-        microseconds now{Now().GetMicroSeconds()};
+        Time now = Now();
         if (prevTs < measureStartTime && now >= measureStartTime) {
             pastTxByteCnt = totalTxByteCnt;
             pastTxPktCnt = totalTxPktCnt;
             for (auto &x : txPktSizeHist) {
                 x = 0;
             }
-            for (auto &midApp : midApps) {
+            for (auto &midApp : flowTables) {
                 midApp->enableStats();
             }
         }
@@ -144,40 +145,44 @@ run (string traffFileName, vector<pair<int, microseconds>> hashTableArgs)
         auto i = pkt->GetSize() / 100;
         txPktSizeHist[i]++;
 
-        auto copiedPkt = pkt->Copy();
-        for (auto &midApp : midApps) {
-            midApp->HandlePacket(copiedPkt);
+        std::optional pktMeta = TcpPktMetadata::FromPppPkt(pkt);
+        if (pktMeta.has_value()) {
+            for (auto &flowTable : flowTables) {
+                flowTable->DoRecord(pktMeta.value());
+            }
+            flowStats.Record(pktMeta.value());
         }
     };
     auto ns3Callback = MakeCallbackFromCallable (txCb);
     receiverSidePort->TraceConnectWithoutContext("PhyTxBegin", ns3Callback);
 
-    Simulator::Stop(toNsTime(measureEndTime));
-    // =======================================================================================================
+    Simulator::Stop(measureEndTime);
+    // ================================================================================
     Simulator::Run ();
-    Simulator::Destroy ();
-
+    
     std::cout << "total TX: " << totalTxPktCnt << " packets, "
               << totalTxByteCnt << " B" << std::endl;
-    std::cout << "from " << toNsTime(measureStartTime).GetSeconds() << "s"
-            << " to " <<  toNsTime(measureEndTime).GetSeconds() << "s\n";
+    std::cout << "from " << measureStartTime.GetSeconds() << "s"
+            << " to " <<  measureEndTime.GetSeconds() << "s\n";
     std::cout << "TX: " << totalTxPktCnt - pastTxPktCnt << " packets, "
               << totalTxByteCnt - pastTxByteCnt << " B" << std::endl;
-    for (int i = 0; i < (int)midApps.size(); i++) {
-        auto &midApp = midApps[i];
+    for (int i = 0; i < (int)flowTables.size(); i++) {
+        auto &midApp = flowTables[i];
         std::cout << "======== " << "table=" << hashTableArgs[i].first << "," << hashTableArgs[i].second << " ========\n";
         std::cout << "records: " << midApp->GetRecordCnt()
                 << ", expires: " << midApp->GetExpirCnt()
                 << ", collisions: " << midApp->GetCollisionCnt()
                 << "\n\n\n";
-        if (i == (int)midApps.size() - 1) {
-            midApp->PrintFlowDurationStats();
-        }
     }
+    flowStats.printStats();
+
     std::cout << "\n\n======== Packet Size Distribution ========\n";
     for (int i = 0; i < 16; i++) {
         std::cout << i * 100 << "~" << (i+1)*100 << ": " << txPktSizeHist[i] << std::endl;
     }
+
+    // ================================================================================
+    Simulator::Destroy ();
 }
 
 
@@ -206,7 +211,7 @@ main (int argc, char *argv[])
     }
     
     for (const auto &traffModel : traffModels) {
-        string file = "scratch/measure-sim/traff-" + traffModel + ".txt";
+        string file = "scratch/measure-sim/traff-" + traffModel + "-100Gbps.txt";
         std::cout << "\n\n========" << " model=" << traffModel << " ========\n";
         run(file, hashTableArgs);
     }
