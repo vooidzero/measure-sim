@@ -18,6 +18,7 @@ struct TcpPktMetadata {
 };
 
 
+
 class FlowTable {
 public:
     FlowTable(int hashTableSize = 4096, microseconds ttl = -1us);
@@ -25,11 +26,8 @@ public:
 
     void DoRecord(const TcpPktMetadata &pktMeta);
 
-    void enableStats() { m_statsEnabled = true; }
-
-    int GetRecordCnt() const { return m_recordCnt; }
-    int GetExpirCnt() const { return m_expirCnt; }
-    int GetCollisionCnt() const { return m_collisionCnt; }
+    void EnableStats() { m_statsEnabled = true; }
+    void PrintStats() const;
 
 private:
     struct Record;
@@ -44,18 +42,18 @@ private:
     int m_expirCnt = 0;
     int m_collisionCnt = 0;
 
-    void OutputRecord(const Record &record);
+    void OutputRecord(Record &cell);
 };
 
 
 struct FlowTable::Record {
     FlowTuple flow;
     uint32_t startTime = 0;
-    uint16_t endTime = 0;
+    uint32_t endTime = 0;
     uint32_t pktCnt = 0;
     uint32_t byteCnt = 0;
 
-    static constexpr int SerializedSize = FlowTuple::SerializedSize + 12;
+    static constexpr int SerializedSize = FlowTuple::SerializedSize + 16;
 
     Record() { flow.proto = 0; }
 
@@ -71,8 +69,8 @@ struct FlowTable::Record {
 
     void Serialize(Buffer::Iterator &bufIt) const {
         flow.Serialize(bufIt);
-        bufIt.WriteHtonU16(startTime);
-        bufIt.WriteHtonU16(endTime);
+        bufIt.WriteHtonU32(startTime);
+        bufIt.WriteHtonU32(endTime);
         bufIt.WriteHtonU32(pktCnt);
         bufIt.WriteHtonU32(byteCnt);
     }
@@ -97,7 +95,7 @@ public:
     }
 
     void Record(const TcpPktMetadata &pktMeta);
-    void printStats();
+    void PrintStats();
 
 private:
     Time startTime;

@@ -45,19 +45,34 @@ FlowTable::FlowTable(int hashTableSize, microseconds ttl)
     m_hashTable{new Record[hashTableSize]}
 {}
 
-void FlowTable::OutputRecord(const Record &record) {
+void FlowTable::OutputRecord(Record &cell) {
     if (m_statsEnabled) {
         m_recordCnt++;
     }
+    cell.Reset();
 }
 
 void FlowTable::DoRecord(const TcpPktMetadata &pktMeta) {
     const FlowTuple &flow = pktMeta.flow;
+    nanoseconds now{Now().GetNanoSeconds()};
     uint32_t idx = flow.GetHashValue() % m_hashTableSize;
-    microseconds now{Now().GetMicroSeconds()};
     auto &cell = m_hashTable[idx];
+
+    constexpr uint8_t shouldFlushMask = TcpHeader::FIN | TcpHeader::RST;
+    bool shouldFlush = ((pktMeta.tcpFlags & shouldFlushMask) != 0);
+
     if (cell.IsValid()) {
-        bool isExpired = (m_ttl > 0us && now - microseconds{cell.startTime} > m_ttl);
+        if (shouldFlush) {
+            if (flow == cell.flow) {
+                OutputRecord(cell);
+            } else if (m_statsEnabled) {
+                m_recordCnt++;
+            }
+            return;
+        }
+
+        decltype(now) startTime{cell.startTime};
+        bool isExpired = (m_ttl > 0us && now - startTime > m_ttl);
         if (m_statsEnabled) {
             if (flow != cell.flow) {
                 m_collisionCnt++;
@@ -67,10 +82,15 @@ void FlowTable::DoRecord(const TcpPktMetadata &pktMeta) {
         }
         
         if (flow != cell.flow || isExpired) {
-            OutputRecord(cell);
-            cell.Reset(); // set cell to invalid
+            OutputRecord(cell); // set cell to invalid
         }
+    } else if (shouldFlush) {
+        if (m_statsEnabled) {
+            m_recordCnt++;
+        }
+        return;
     }
+
     if (!cell.IsValid()) {
         cell.flow = flow;
         cell.startTime = now.count();
@@ -79,13 +99,20 @@ void FlowTable::DoRecord(const TcpPktMetadata &pktMeta) {
     cell.endTime = now.count();
     cell.pktCnt += 1;
     cell.byteCnt += pktMeta.payloadSize;
-    
-    uint8_t shouldFlushMask = TcpHeader::FIN | TcpHeader::RST;
-    bool shouldFlush = ((pktMeta.tcpFlags & shouldFlushMask) != 0);
-    if (shouldFlush) {
-        OutputRecord(cell);
-    }
 }
+
+void FlowTable::PrintStats() const {
+    std::cout << "========"
+            << " Table entCnt=" << m_hashTableSize
+            << ", ttl=" << m_ttl
+            << " ========\n";
+    std::cout << "records: " << m_recordCnt
+                << ", expires: " << m_expirCnt
+                << ", collisions: " << m_collisionCnt
+                << std::endl;
+    std::cout << std::endl << std::endl;
+}
+
 
 void FlowStats::Record(const TcpPktMetadata &pktMeta) {
     auto now = Now();
@@ -102,7 +129,7 @@ void FlowStats::Record(const TcpPktMetadata &pktMeta) {
     activeFlowSet.insert(pktMeta.flow);
 }
 
-void FlowStats::printStats() {
+void FlowStats::PrintStats() {
     if (Now() > epochEndTime - MicroSeconds(1)) {
         samples.push_back(activeFlowSet.size());
         activeFlowSet.clear();

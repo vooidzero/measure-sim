@@ -1,4 +1,3 @@
-
 #include "ns3/application-container.h"
 #include "ns3/core-module.h"
 #include "ns3/nstime.h"
@@ -16,6 +15,7 @@
 #include <vector>
 
 #include "FlowTable.h"
+#include "MultiLevelTable.h"
 #include "MakeCallbackHelper.h"
 
 
@@ -28,12 +28,13 @@ int zip = 1;
 
 string linkRate = "100Gbps";
 string linkDelay = "500ns";
+milliseconds TraffDuration = 1000ms;
 
 void
-run (string traffFileName, vector<pair<int, microseconds>> hashTableArgs)
+run (string traffFileName, vector<MultiLevelTable::Config> tableConfigs)
 {
-    Time measureDuration = MilliSeconds(500) / zip;
-    Time measureEndTime = Seconds(1) + Seconds(1) / zip;
+    Time measureDuration = MilliSeconds(TraffDuration.count() / 2) / zip;
+    Time measureEndTime = Seconds(1) + MilliSeconds(TraffDuration.count()) / zip;
     Time measureStartTime = measureEndTime - measureDuration;
 
     std::ifstream traffFile{traffFileName};
@@ -113,8 +114,12 @@ run (string traffFileName, vector<pair<int, microseconds>> hashTableArgs)
     sinkApps.Start(Seconds (0));
 
     vector<std::unique_ptr<FlowTable>> flowTables;
-    for (auto [sz, ttl] : hashTableArgs) {
-        flowTables.push_back(std::make_unique<FlowTable>(sz, ttl));
+    for (int sz : {4'000, 40'000, 400'000}) {
+        flowTables.push_back(std::make_unique<FlowTable>(sz, 1'000us));
+    }
+    vector<std::unique_ptr<MultiLevelTable>> levelTables;
+    for (const auto &cfg : tableConfigs) {
+        levelTables.push_back(std::make_unique<MultiLevelTable>(cfg));
     }
     FlowStats flowStats;
     flowStats.setStatsStartTime(measureStartTime);
@@ -133,8 +138,11 @@ run (string traffFileName, vector<pair<int, microseconds>> hashTableArgs)
             for (auto &x : txPktSizeHist) {
                 x = 0;
             }
-            for (auto &midApp : flowTables) {
-                midApp->enableStats();
+            for (auto &tbl : flowTables) {
+                tbl->EnableStats();
+            }
+            for (auto &tbl : levelTables) {
+                tbl->EnableStats();
             }
         }
         prevTs = now;
@@ -147,8 +155,11 @@ run (string traffFileName, vector<pair<int, microseconds>> hashTableArgs)
 
         std::optional pktMeta = TcpPktMetadata::FromPppPkt(pkt);
         if (pktMeta.has_value()) {
-            for (auto &flowTable : flowTables) {
-                flowTable->DoRecord(pktMeta.value());
+            for (auto &tbl : flowTables) {
+                tbl->DoRecord(pktMeta.value());
+            }
+            for (auto &tbl : levelTables) {
+                tbl->DoRecord(pktMeta.value());
             }
             flowStats.Record(pktMeta.value());
         }
@@ -166,15 +177,14 @@ run (string traffFileName, vector<pair<int, microseconds>> hashTableArgs)
             << " to " <<  measureEndTime.GetSeconds() << "s\n";
     std::cout << "TX: " << totalTxPktCnt - pastTxPktCnt << " packets, "
               << totalTxByteCnt - pastTxByteCnt << " B" << std::endl;
-    for (int i = 0; i < (int)flowTables.size(); i++) {
-        auto &midApp = flowTables[i];
-        std::cout << "======== " << "table=" << hashTableArgs[i].first << "," << hashTableArgs[i].second << " ========\n";
-        std::cout << "records: " << midApp->GetRecordCnt()
-                << ", expires: " << midApp->GetExpirCnt()
-                << ", collisions: " << midApp->GetCollisionCnt()
-                << "\n\n\n";
+    for (const auto &tbl : flowTables) {
+        tbl->PrintStats();
     }
-    flowStats.printStats();
+    std::cout << "\n\n\n\n\n";
+    for (auto &tbl : levelTables) {
+        tbl->PrintStats();
+    }
+    flowStats.PrintStats();
 
     std::cout << "\n\n======== Packet Size Distribution ========\n";
     for (int i = 0; i < 16; i++) {
@@ -189,30 +199,44 @@ run (string traffFileName, vector<pair<int, microseconds>> hashTableArgs)
 int
 main (int argc, char *argv[])
 {
+    string traffModel{"AliStorage"};
+
     CommandLine cmd (__FILE__);
-    // cmd.AddValue ("linkRate", "link bandwith", linkRate);
-    // cmd.AddValue ("linkDelay", "link delay", linkDelay);
     cmd.AddValue ("zip", "zip ratio (e.g. 1, 2, 4, ...)", zip);
+    cmd.AddValue ("traff", "traffic model (e.g. AliStorage, GoogleRPC, ...)", traffModel);
     cmd.Parse (argc, argv);
+
+    if (traffModel == "AliStorage") {
+        TraffDuration = 1000ms;
+    } else if (traffModel == "GoogleRPC") {
+        TraffDuration = 320ms;
+    } else {
+        std::cerr << "traffic model not expected\n";
+        exit(1);
+    }
 
     Time::SetResolution (Time::NS);
     Config::SetDefault ("ns3::TcpSocket::SegmentSize", UintegerValue {1440});
     Config::SetDefault ("ns3::TcpSocket::ConnTimeout", TimeValue {Seconds(1)});
     // Config::SetDefault ("ns3::DropTailQueue<Packet>::MaxSize", QueueSizeValue{QueueSize {"4096p"}});
 
-    vector<string> traffModels {
-        "AliStorage"
-    };
-    vector<pair<int, microseconds>> hashTableArgs;
-    for (microseconds ttl : {50us, 250us, 1'000us, 50'000us, -1us}) {
-        for (int size : {400, 4'000, 40'000}) {
-            hashTableArgs.emplace_back(size, ttl);
+    vector<MultiLevelTable::Config> tableConfigs;
+    MultiLevelTable::Config config;
+    for (double alpha : {-1.0, 0.25, 0.5, 0.75}) {
+        config.alpha = alpha;
+        for (microseconds ttl : {1'000us}) {
+            config.ttl = ttl;
+            for (int colCnt : {1, 2, 3, 4}) {
+                config.colCnt = colCnt;
+                for (int rowCnt : {4'000, 40'000, 400'000}) {
+                    config.rowCnt = rowCnt;
+                    tableConfigs.push_back(config);
+                }
+            }
         }
     }
-    
-    for (const auto &traffModel : traffModels) {
-        string file = "scratch/measure-sim/traff-" + traffModel + "-100Gbps.txt";
-        std::cout << "\n\n========" << " model=" << traffModel << " ========\n";
-        run(file, hashTableArgs);
-    }
+
+    string file = "scratch/measure-sim/traff-" + traffModel + "-100Gbps.txt";
+    std::cout << "\n\n========" << " model=" << traffModel << " ========\n";
+    run(file, tableConfigs);
 }
