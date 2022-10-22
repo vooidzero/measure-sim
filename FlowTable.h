@@ -1,6 +1,5 @@
 #pragma once
-#include "ns3/packet.h"
-#include <iterator>
+
 #include <memory>
 #include <set>
 #include <vector>
@@ -9,15 +8,7 @@
 
 using namespace ns3;
 
-struct TcpPktMetadata {
-    FlowTuple flow;
-    uint32_t payloadSize;
-    uint8_t tcpFlags;
-
-    static std::optional<TcpPktMetadata> FromPppPkt(Ptr<const Packet>);
-};
-
-
+struct TcpPktMetadata;
 
 class FlowTable {
 public:
@@ -26,7 +17,10 @@ public:
 
     void DoRecord(const TcpPktMetadata &pktMeta);
 
-    void EnableStats() { m_statsEnabled = true; }
+    void SetStatsBeginTs(nanoseconds ts) {
+        m_statsEnabled = false;
+        m_statsBeginTs = ts;
+    }
     void PrintStats() const;
 
 private:
@@ -36,8 +30,8 @@ private:
     microseconds m_ttl;
     std::unique_ptr<Record[]> m_hashTable;
 
-    bool m_statsEnabled = false;
-
+    nanoseconds m_statsBeginTs{0};
+    bool m_statsEnabled = true;
     int m_recordCnt = 0;
     int m_expirCnt = 0;
     int m_collisionCnt = 0;

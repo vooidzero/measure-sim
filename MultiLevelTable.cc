@@ -1,5 +1,8 @@
-#include "ns3/tcp-header.h"
 #include "MultiLevelTable.h"
+
+#include "ns3/tcp-header.h"
+#include "TcpPktMeta.h"
+
 
 static Hasher murmur3{Create<Hash::Function::Murmur3>()};
 static Hasher fnv1a{Create<Hash::Function::Fnv1a>()};
@@ -15,14 +18,6 @@ std::vector<uint32_t> GetHashs(const FlowTuple &tuple, int mod) {
     }
     return ret;
 }
-
-struct TcpPktMetadata {
-    FlowTuple flow;
-    uint32_t payloadSize;
-    uint8_t tcpFlags;
-
-    static std::optional<TcpPktMetadata> FromPppPkt(Ptr<const Packet>);
-};
 
 MultiLevelTable::MultiLevelTable(const Config &cfg)
     : m_cfg{cfg}, m_table(new Cell[cfg.rowCnt * cfg.colCnt])
@@ -43,13 +38,21 @@ void MultiLevelTable::OutputRecord(Cell &cell) {
 }
 
 void MultiLevelTable::DoRecord(const TcpPktMetadata &pktMeta) {
-    nanoseconds now{Now().GetNanoSeconds()};
+    nanoseconds now = pktMeta.timestamp;
+    if (now >= m_statsBeginTs) {
+        m_statsEnabled = true;
+    }
+
     const FlowTuple &flow = pktMeta.flow;
     constexpr uint8_t FlushMask = TcpHeader::FIN | TcpHeader::RST;
     bool shouldFlush = ((pktMeta.tcpFlags & FlushMask) != 0);
     auto hashs = GetHashs(flow, m_cfg.rowCnt);
-    // uint32_t row = flow.GetHashValue() % m_cfg.rowCnt;
-    
+    if (!m_cfg.diffHashFunc) {
+        for (int i = 1; i < (int)hashs.size(); i++) {
+            hashs[i] = hashs[0];
+        }
+    }
+
     auto getCell = [&hashs, this](int col) -> Cell& {
         return CellAt(hashs[col], col);
     };
@@ -101,11 +104,14 @@ void MultiLevelTable::DoRecord(const TcpPktMetadata &pktMeta) {
             colToInsert = m_random->GetInteger(0, m_cfg.colCnt - 1);
         } else {
             colToInsert = 0;
-            uint32_t maxUpdateInterval = getCell(0).updateInterval;
-            for (int col = 1; col < m_cfg.colCnt; col++) {
+            uint32_t maxUpdateInterval = 0;
+            getCell(0).updateInterval;
+            for (int col = 0; col < m_cfg.colCnt; col++) {
                 Cell &cell = getCell(col);
-                if (cell.updateInterval > maxUpdateInterval) {
-                    maxUpdateInterval = cell.updateInterval;
+                uint32_t t = now.count() - cell.endTime;
+                uint32_t updateInterval = m_cfg.alpha * t + (1 - m_cfg.alpha) * cell.updateInterval;
+                if (updateInterval > maxUpdateInterval) {
+                    maxUpdateInterval = updateInterval;
                     colToInsert = col;
                 }
             }
@@ -123,10 +129,15 @@ void MultiLevelTable::DoRecord(const TcpPktMetadata &pktMeta) {
 }
 
 void MultiLevelTable::PrintStats() const {
-    std::cout << "========"
-            << " rowCnt=" << m_cfg.rowCnt
+    std::cout << "======== replacePolicy=";
+    if (m_cfg.alpha < 0) {
+        std::cout << "random";
+    } else {
+        std::cout << "alpha=" << m_cfg.alpha;
+    }
+    std::cout << ", diffHash=" << (m_cfg.diffHashFunc ? "true" : "false")
+            << ", rowCnt=" << m_cfg.rowCnt
             << ", colCnt=" << m_cfg.colCnt
-            << ", alpha=" << m_cfg.alpha
             << ", ttl=" << m_cfg.ttl
             << " ========"
             << std::endl;

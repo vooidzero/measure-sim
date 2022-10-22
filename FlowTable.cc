@@ -1,43 +1,11 @@
 #include "FlowTable.h"
-#include "TimeHelper.h"
-#include "ns3/nstime.h"
-#include "ns3/point-to-point-net-device.h"
-#include "ns3/ipv4-address.h"
-#include "ns3/ppp-header.h"
-#include "ns3/simulator.h"
-#include "ns3/ipv4-l3-protocol.h"
-#include "ns3/tcp-header.h"
+
 #include <algorithm>
-#include <queue>
+#include "ns3/simulator.h"
+#include "ns3/tcp-header.h"
+#include "TcpPktMeta.h"
 
 NS_LOG_COMPONENT_DEFINE ("FlowTable");
-
-std::optional<TcpPktMetadata> 
-TcpPktMetadata::FromPppPkt(Ptr<const Packet> constPkt) {
-    PppHeader pppHeader;
-    Ipv4Header ipHdr;
-    TcpHeader tcpHdr;
-    TcpPktMetadata meta;
-    auto pkt = constPkt->Copy();
-    pkt->RemoveHeader(pppHeader);
-    if (pppHeader.GetProtocol() != 0x0021) {
-        // non-ipv4 packet
-        return {};
-    }
-    pkt->RemoveHeader(ipHdr);
-    if (ipHdr.GetProtocol() != TcpL4Protocol::PROT_NUMBER) {
-        return {};
-    }
-    pkt->RemoveHeader(tcpHdr);
-    meta.flow.srcAddr = ipHdr.GetSource().Get();
-    meta.flow.dstAddr = ipHdr.GetDestination().Get();
-    meta.flow.proto = ipHdr.GetProtocol();
-    meta.flow.srcPort = tcpHdr.GetSourcePort();
-    meta.flow.dstPort = tcpHdr.GetDestinationPort();
-    meta.tcpFlags = tcpHdr.GetFlags();
-    meta.payloadSize = pkt->GetSize();
-    return meta;
-}
 
 FlowTable::FlowTable(int hashTableSize, microseconds ttl)
     : m_hashTableSize{hashTableSize},
@@ -53,8 +21,12 @@ void FlowTable::OutputRecord(Record &cell) {
 }
 
 void FlowTable::DoRecord(const TcpPktMetadata &pktMeta) {
+    nanoseconds now = pktMeta.timestamp;
+    if (now >= m_statsBeginTs) {
+        m_statsEnabled = true;
+    }
+    
     const FlowTuple &flow = pktMeta.flow;
-    nanoseconds now{Now().GetNanoSeconds()};
     uint32_t idx = flow.GetHashValue() % m_hashTableSize;
     auto &cell = m_hashTable[idx];
 

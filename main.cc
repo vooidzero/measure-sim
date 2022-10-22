@@ -13,7 +13,10 @@
 #include <fstream>
 #include <string>
 #include <vector>
+#include <sstream>
+#include <filesystem>
 
+#include "TcpPktMeta.h"
 #include "FlowTable.h"
 #include "MultiLevelTable.h"
 #include "MakeCallbackHelper.h"
@@ -24,28 +27,35 @@ using std::string;
 using std::vector;
 using std::pair;
 
-int zip = 1;
+namespace fs = std::filesystem;
+
 
 string linkRate = "100Gbps";
 string linkDelay = "500ns";
 milliseconds TraffDuration = 1000ms;
+int zip = 1;
 
-void
-run (string traffFileName, vector<MultiLevelTable::Config> tableConfigs)
-{
+void GenPktTrace(string traffFilename, string pktTraceFilename) {
+    Time::SetResolution (Time::NS);
+    Config::SetDefault ("ns3::TcpSocket::SegmentSize", UintegerValue {1440});
+    Config::SetDefault ("ns3::TcpSocket::ConnTimeout", TimeValue {Seconds(1)});
+    // Config::SetDefault ("ns3::DropTailQueue<Packet>::MaxSize", QueueSizeValue{QueueSize {"4096p"}});
+
     Time measureDuration = MilliSeconds(TraffDuration.count() / 2) / zip;
     Time measureEndTime = Seconds(1) + MilliSeconds(TraffDuration.count()) / zip;
     Time measureStartTime = measureEndTime - measureDuration;
 
-    std::ifstream traffFile{traffFileName};
+    std::ifstream traffFile{traffFilename};
     if (!traffFile.is_open()) {
-        std::cout << "Failed to open " << traffFileName << std::endl;
+        std::cout << "Failed to open " << traffFilename << std::endl;
         return;
     }
     int flowCnt = 0;
     traffFile >> flowCnt;
     int senderCnt = (flowCnt + 64999) / 65000;
 
+
+    // build topo
     NodeContainer senderNodes{(uint32_t)senderCnt};
     auto middleNode = CreateObject<Node>();
     auto receiverNode = CreateObject<Node>();
@@ -82,6 +92,13 @@ run (string traffFileName, vector<MultiLevelTable::Config> tableConfigs)
     Ipv4GlobalRoutingHelper::PopulateRoutingTables ();
 
     uint16_t recvPort = 9;
+    InetSocketAddress sinkAddr{Ipv4Address::GetAny(), recvPort};
+    PacketSinkHelper sink{"ns3::TcpSocketFactory", sinkAddr};
+    ApplicationContainer sinkApps = sink.Install(receiverNode);
+    sinkApps.Start(Seconds (0));
+
+
+    // read flows
     int64_t genTotalBytes = 0;
     for (int i = 0; i < flowCnt; i++) {
         double ts;
@@ -108,82 +125,55 @@ run (string traffFileName, vector<MultiLevelTable::Config> tableConfigs)
     traffFile.close();
     std::cout << "Generate: " << flowCnt << " flows, " << genTotalBytes << " B\n";
 
-    InetSocketAddress sinkAddr{Ipv4Address::GetAny(), recvPort};
-    PacketSinkHelper sink{"ns3::TcpSocketFactory", sinkAddr};
-    ApplicationContainer sinkApps = sink.Install(receiverNode);
-    sinkApps.Start(Seconds (0));
 
-    vector<std::unique_ptr<FlowTable>> flowTables;
-    for (int sz : {4'000, 40'000, 400'000}) {
-        flowTables.push_back(std::make_unique<FlowTable>(sz, 1'000us));
+    // trace
+    std::ofstream pktTraceFile{pktTraceFilename, std::ios::binary};
+    if (!pktTraceFile.is_open()) {
+        std::cout << "Failed to open " << pktTraceFilename << std::endl;
+        return;
     }
-    vector<std::unique_ptr<MultiLevelTable>> levelTables;
-    for (const auto &cfg : tableConfigs) {
-        levelTables.push_back(std::make_unique<MultiLevelTable>(cfg));
-    }
+
     FlowStats flowStats;
     flowStats.setStatsStartTime(measureStartTime);
-
     int64_t totalTxPktCnt = 0;
     int64_t totalTxByteCnt = 0;
-    int64_t pastTxPktCnt = 0;
-    int64_t pastTxByteCnt = 0;
+    int64_t caredTxPktCnt = 0;
+    int64_t caredTxByteCnt = 0;
     int64_t txPktSizeHist[16] = {0};
     Time prevTs{0};
     auto txCb = [&](Ptr<const Packet> pkt) {
         Time now = Now();
-        if (prevTs < measureStartTime && now >= measureStartTime) {
-            pastTxByteCnt = totalTxByteCnt;
-            pastTxPktCnt = totalTxPktCnt;
-            for (auto &x : txPktSizeHist) {
-                x = 0;
-            }
-            for (auto &tbl : flowTables) {
-                tbl->EnableStats();
-            }
-            for (auto &tbl : levelTables) {
-                tbl->EnableStats();
-            }
-        }
-        prevTs = now;
-
         totalTxPktCnt++;
         totalTxByteCnt += pkt->GetSize();
+        if (now >= measureStartTime) {
+            caredTxPktCnt++;
+            caredTxByteCnt += pkt->GetSize();
+        }
 
         auto i = pkt->GetSize() / 100;
         txPktSizeHist[i]++;
 
-        std::optional pktMeta = TcpPktMetadata::FromPppPkt(pkt);
-        if (pktMeta.has_value()) {
-            for (auto &tbl : flowTables) {
-                tbl->DoRecord(pktMeta.value());
-            }
-            for (auto &tbl : levelTables) {
-                tbl->DoRecord(pktMeta.value());
-            }
-            flowStats.Record(pktMeta.value());
+        std::optional pktMeta = TcpPktMetadata::FromPppPkt(pkt, now);
+        if (!pktMeta.has_value()) {
+            return;
         }
+        flowStats.Record(pktMeta.value());
+        pktMeta->WriteToFstream(pktTraceFile);
     };
     auto ns3Callback = MakeCallbackFromCallable (txCb);
     receiverSidePort->TraceConnectWithoutContext("PhyTxBegin", ns3Callback);
 
+
     Simulator::Stop(measureEndTime);
-    // ================================================================================
     Simulator::Run ();
-    
-    std::cout << "total TX: " << totalTxPktCnt << " packets, "
-              << totalTxByteCnt << " B" << std::endl;
-    std::cout << "from " << measureStartTime.GetSeconds() << "s"
-            << " to " <<  measureEndTime.GetSeconds() << "s\n";
-    std::cout << "TX: " << totalTxPktCnt - pastTxPktCnt << " packets, "
-              << totalTxByteCnt - pastTxByteCnt << " B" << std::endl;
-    for (const auto &tbl : flowTables) {
-        tbl->PrintStats();
-    }
-    std::cout << "\n\n\n\n\n";
-    for (auto &tbl : levelTables) {
-        tbl->PrintStats();
-    }
+
+    pktTraceFile.close();
+
+    std::cout << "TX Total: "
+            << totalTxPktCnt << " pkts, " << totalTxByteCnt << " B" << std::endl;
+    std::cout << "TX from " << measureStartTime.GetSeconds() << "s"
+            << " to " <<  measureEndTime.GetSeconds() << "s: "
+            << caredTxPktCnt << " pkts, " << caredTxByteCnt << " B" << std::endl;
     flowStats.PrintStats();
 
     std::cout << "\n\n======== Packet Size Distribution ========\n";
@@ -191,8 +181,74 @@ run (string traffFileName, vector<MultiLevelTable::Config> tableConfigs)
         std::cout << i * 100 << "~" << (i+1)*100 << ": " << txPktSizeHist[i] << std::endl;
     }
 
-    // ================================================================================
     Simulator::Destroy ();
+}
+
+
+void
+run (string pktTraceFilename, vector<MultiLevelTable::Config> tableConfigs)
+{
+    nanoseconds statsDuration = nanoseconds{TraffDuration} / ( 2 * zip);
+    nanoseconds statsEndTs = 1s + nanoseconds{TraffDuration} / zip;
+    nanoseconds statsBeginTs = statsEndTs - statsDuration;
+
+    vector<std::unique_ptr<FlowTable>> flowTables;
+    for (int sz : {4'000, 20'000, 40'000, 80'000, 200'000}) {
+        auto tbl = std::make_unique<FlowTable>(sz, 1'000us);
+        tbl->SetStatsBeginTs(statsBeginTs);
+        flowTables.push_back(std::move(tbl));
+    }
+
+    vector<std::unique_ptr<MultiLevelTable>> multiLevelTables;
+    for (const auto &cfg : tableConfigs) {
+        auto tbl = std::make_unique<MultiLevelTable>(cfg);
+        tbl->SetStatsBeginTs(statsBeginTs);
+        multiLevelTables.push_back(std::move(tbl));
+    }
+
+
+    std::ifstream pktTraceFile{pktTraceFilename, std::ios::binary};
+    if (!pktTraceFile.is_open()) {
+        std::cout << "Failed to open " << pktTraceFilename << std::endl;
+        return;
+    }
+
+    int64_t totalPktCnt = 0;
+    int64_t caredPktCnt = 0;
+    int64_t caredPhyByteCnt = 0;
+    while (1) {
+        std::optional pktMeta = TcpPktMetadata::FromFstream(pktTraceFile);
+        if (!pktMeta.has_value()) {
+            break;
+        }
+        totalPktCnt++;
+
+        nanoseconds now = pktMeta->timestamp;
+        if (now >= statsBeginTs) {
+            caredPktCnt++;
+            caredPhyByteCnt += pktMeta->phyPktSize;
+        }
+
+        for (auto &tbl : flowTables) {
+            tbl->DoRecord(pktMeta.value());
+        }
+        for (auto &tbl : multiLevelTables) {
+            tbl->DoRecord(pktMeta.value());
+        }
+    }
+
+    std::cout << "totalPktCnt=" << totalPktCnt
+            << ", caredPktCnt=" << caredPktCnt
+            << ", caredPhyByteCnt" << caredPhyByteCnt
+            << "\n\n";
+
+    for (const auto &tbl : flowTables) {
+        tbl->PrintStats();
+    }
+    std::cout << "\n\n\n\n\n";
+    for (auto &tbl : multiLevelTables) {
+        tbl->PrintStats();
+    }
 }
 
 
@@ -200,10 +256,12 @@ int
 main (int argc, char *argv[])
 {
     string traffModel{"AliStorage"};
+    string mode{"run"};
 
     CommandLine cmd (__FILE__);
-    cmd.AddValue ("zip", "zip ratio (e.g. 1, 2, 4, ...)", zip);
-    cmd.AddValue ("traff", "traffic model (e.g. AliStorage, GoogleRPC, ...)", traffModel);
+    cmd.AddValue("traff", "traffic model (e.g. AliStorage, GoogleRPC, ...)", traffModel);
+    cmd.AddValue("zip", "zip ratio (e.g. 1, 2, 4, ...)", zip);
+    cmd.AddNonOption("mode", "'run' or 'genTrace'", mode);
     cmd.Parse (argc, argv);
 
     if (traffModel == "AliStorage") {
@@ -215,28 +273,43 @@ main (int argc, char *argv[])
         exit(1);
     }
 
-    Time::SetResolution (Time::NS);
-    Config::SetDefault ("ns3::TcpSocket::SegmentSize", UintegerValue {1440});
-    Config::SetDefault ("ns3::TcpSocket::ConnTimeout", TimeValue {Seconds(1)});
-    // Config::SetDefault ("ns3::DropTailQueue<Packet>::MaxSize", QueueSizeValue{QueueSize {"4096p"}});
+    std::cout << "========"
+            << " model=" << traffModel
+            << "-" << zip << "x"
+            << " ========\n";
+
+    std::ostringstream oss;
+    oss << "scratch/measure-sim/pktTrace-" << traffModel << "-" << zip << "x.bin";
+    string pktTraceFilename = oss.str();
+    string traffFilename = "scratch/measure-sim/traff-" + traffModel + "-100Gbps.txt";
+
+    if (mode == "genTrace") {
+        GenPktTrace(traffFilename, pktTraceFilename);
+        return 0;
+    } else if (mode != "run") {
+        std::cerr << "unexpected mode '" << mode << "' (should be 'run' or 'genTrace')\n";
+    }
+
+    if (!fs::exists(pktTraceFilename)) {
+        std::cerr << "pkt trace file not found. generating it...\n";
+        GenPktTrace(traffFilename, pktTraceFilename);
+    }
 
     vector<MultiLevelTable::Config> tableConfigs;
     MultiLevelTable::Config config;
-    for (double alpha : {-1.0, 0.25, 0.5, 0.75}) {
+    config.ttl = 1ms;
+    for (double alpha : {-1.0, 0.25, 0.5, 0.75, 1.0}) {
         config.alpha = alpha;
-        for (microseconds ttl : {1'000us}) {
-            config.ttl = ttl;
-            for (int colCnt : {1, 2, 3, 4}) {
+        for (bool diffHashFunc : {false, true}) {
+            config.diffHashFunc = diffHashFunc;
+            for (int colCnt : {2, 3, 4}) {
                 config.colCnt = colCnt;
-                for (int rowCnt : {4'000, 40'000, 400'000}) {
+                for (int rowCnt : {4'000, 20'000, 40'000, 80'000, 200'000}) {
                     config.rowCnt = rowCnt;
                     tableConfigs.push_back(config);
                 }
             }
         }
     }
-
-    string file = "scratch/measure-sim/traff-" + traffModel + "-100Gbps.txt";
-    std::cout << "\n\n========" << " model=" << traffModel << " ========\n";
-    run(file, tableConfigs);
+    run(pktTraceFilename, tableConfigs);
 }

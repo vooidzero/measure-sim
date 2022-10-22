@@ -1,8 +1,5 @@
 #pragma once
-#include <vector>
 #include "ns3/core-module.h"
-#include "ns3/packet.h"
-
 #include "FlowTuple.h"
 #include "TimeHelper.h"
 
@@ -15,12 +12,17 @@ public:
         int colCnt; // how many cells for each hash value
         microseconds ttl;
         double alpha; // if negative, replace policy is random
+        bool diffHashFunc;
     };
 
     MultiLevelTable(const Config &config);
     
     void DoRecord(const TcpPktMetadata &pktMeta);
-    void EnableStats() { m_statsEnabled = true; }
+    
+    void SetStatsBeginTs(nanoseconds ts) {
+        m_statsEnabled = false;
+        m_statsBeginTs = ts;
+    }
     void PrintStats() const;
 
 private:
@@ -30,6 +32,7 @@ private:
     std::unique_ptr<Cell[]> m_table;
     Ptr<UniformRandomVariable> m_random;
 
+    nanoseconds m_statsBeginTs{0};
     bool m_statsEnabled = false;
     int m_outputRecordCnt = 0;
     int m_expirCnt = 0;
